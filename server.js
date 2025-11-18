@@ -37,7 +37,7 @@ app.post("/extract-audio", upload.single("video"), (req, res) => {
     return res.status(400).json({ error: "Format not supported for fast conversion" });
 
   const inputPath = req.file.path;
-  const outputName = `audio-${Date.now()}.${format}`;
+  const outputName = audio-${Date.now()}.${format};
   const outputPath = path.join(OUTPUT_DIR, outputName);
 
   const codec = getCodec(format);
