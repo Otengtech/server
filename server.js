@@ -16,54 +16,75 @@ const upload = multer({ dest: "uploads/" });
 const OUTPUT_DIR = "./converted";
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR);
 
-// ONLY choose formats that support codec copy
-const validFormats = ["mp3", "aac", "m4a", "ogg"];
+// Fast formats (these avoid re-encoding when possible)
+const FAST_FORMATS = ["aac", "m4a", "mp3", "ogg"];
+
+function getCodec(format) {
+  switch (format) {
+    case "mp3": return "libmp3lame";
+    case "aac": return "aac";
+    case "wav": return "pcm_s16le";
+    case "ogg": return "libvorbis";
+    default: return null;
+  }
+}
 
 app.post("/extract-audio", upload.single("video"), (req, res) => {
-  const { format = "mp3" } = req.body;
+  const { format = "mp3", bitrate = "128k" } = req.body;
 
-  if (!req.file) {
-    return res.status(400).json({ error: "No video uploaded" });
-  }
-
-  if (!validFormats.includes(format)) {
-    return res.status(400).json({ error: "Unsupported fast format" });
-  }
+  if (!req.file) return res.status(400).json({ error: "No video uploaded" });
+  if (!FAST_FORMATS.includes(format))
+    return res.status(400).json({ error: "Format not supported for fast conversion" });
 
   const inputPath = req.file.path;
   const outputName = `audio-${Date.now()}.${format}`;
   const outputPath = path.join(OUTPUT_DIR, outputName);
 
+  const codec = getCodec(format);
+
   res.setHeader("Content-Type", "application/octet-stream");
 
-  const command = ffmpeg(inputPath)
+  const cmd = ffmpeg(inputPath)
     .noVideo()
 
-    // 🔥 Fastest possible audio extraction (no re-encoding)
+    // ⚡ Attempt SUPER FAST audio copy first
     .audioCodec("copy")
 
-    // 🔥 Use all CPU threads
-    .outputOptions("-threads 0")
-    .outputOptions("-preset ultrafast")
-
-    .on("start", cmd => console.log("FFmpeg START:", cmd))
-    .on("progress", progress => {
-      console.log("Time:", progress.timemark || "N/A");
+    // If audio cannot be copied (wrong codec), FFmpeg will fallback
+    .on("error", () => {
+      // Re-encode fallback using fastest settings
+      ffmpeg(inputPath)
+        .noVideo()
+        .audioCodec(codec)
+        .audioBitrate(bitrate)
+        .outputOptions("-threads 0")
+        .outputOptions("-preset ultrafast")
+        .on("end", () => {
+          res.download(outputPath, () => {
+            fs.unlinkSync(inputPath);
+            fs.unlinkSync(outputPath);
+          });
+        })
+        .on("error", (err) => {
+          console.error(err);
+          fs.unlinkSync(inputPath);
+          res.status(500).json({ error: "Conversion failed" });
+        })
+        .save(outputPath);
     })
+
+    // FASTEST PATH
     .on("end", () => {
-      console.log("DONE!");
       res.download(outputPath, () => {
-        fs.existsSync(outputPath) && fs.unlinkSync(outputPath);
-        fs.existsSync(inputPath) && fs.unlinkSync(inputPath);
+        fs.unlinkSync(inputPath);
+        fs.unlinkSync(outputPath);
       });
     })
-    .on("error", err => {
-      console.error("FFmpeg ERROR:", err.message);
-      fs.existsSync(inputPath) && fs.unlinkSync(inputPath);
-      res.status(500).json({ error: "Conversion failed" });
-    });
 
-  command.save(outputPath);
+    // Max performance options
+    .outputOptions("-threads 0")
+    .outputOptions("-preset ultrafast")
+    .save(outputPath);
 });
 
 app.listen(3001, () => console.log("Server running on port 3001"));
