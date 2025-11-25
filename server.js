@@ -86,5 +86,5 @@ app.post("/extract-audio", upload.single("video"), async (req, res) => {
   }
 });
 
-// Start server
+// Start serve
 app.listen(3001, () => console.log("Server running on port 3001"));
