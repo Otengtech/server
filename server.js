@@ -1,6 +1,7 @@
 import express from "express";
 import multer from "multer";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import ffprobeInstaller from "@ffprobe-installer/ffprobe";
 import ffmpeg from "fluent-ffmpeg";
 import cors from "cors";
 import path from "path";
@@ -8,96 +9,94 @@ import fs from "fs";
 
 const app = express();
 
-// FFmpeg path
+// FFmpeg paths
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
-// CORS
+// CORS: local dev + production frontend
 app.use(cors({
-  origin: ["https://audioremoveio.vercel.app", process.env.CLIENT_URL],
+  origin: [
+    "http://localhost:5173",
+    "https://audioremoveio.vercel.app"
+  ],
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type"],
 }));
 
-// Use /tmp folder for cloud-friendly uploads
+// Detect directories: local or cloud
+const LOCAL_UPLOAD_DIR = "./uploads";
+const LOCAL_OUTPUT_DIR = "./converted";
 const TMP_UPLOAD_DIR = "/tmp/uploads";
 const TMP_OUTPUT_DIR = "/tmp/converted";
 
-if (!fs.existsSync(TMP_UPLOAD_DIR)) fs.mkdirSync(TMP_UPLOAD_DIR, { recursive: true });
-if (!fs.existsSync(TMP_OUTPUT_DIR)) fs.mkdirSync(TMP_OUTPUT_DIR, { recursive: true });
+const UPLOAD_DIR = fs.existsSync(LOCAL_UPLOAD_DIR) ? LOCAL_UPLOAD_DIR : TMP_UPLOAD_DIR;
+const OUTPUT_DIR = fs.existsSync(LOCAL_OUTPUT_DIR) ? LOCAL_OUTPUT_DIR : TMP_OUTPUT_DIR;
+
+// Ensure directories exist
+[UPLOAD_DIR, OUTPUT_DIR].forEach(dir => {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
 
 // Multer setup
-const upload = multer({ dest: TMP_UPLOAD_DIR });
+const upload = multer({ dest: UPLOAD_DIR });
 
-// Supported formats
-const FAST_FORMATS = ["mp3", "aac", "wav", "ogg", "flac"];
-function getCodec(format) {
-  switch (format) {
-    case "mp3": return "libmp3lame";
-    case "aac": return "aac";
-    case "wav": return "pcm_s16le";
-    case "ogg": return "libvorbis";
-    case "flac": return "flac";
-    default: return null;
-  }
-}
-
+// POST route
 app.post("/extract-audio", upload.single("video"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No video uploaded" });
 
-  const { format = "mp3", bitrate = "128k" } = req.body;
-
-  if (!FAST_FORMATS.includes(format)) {
-    return res.status(400).json({ error: "Format not supported" });
-  }
-
   const inputPath = req.file.path;
-  const outputName = `audio-${Date.now()}.${format}`;
-  const outputPath = path.join(TMP_OUTPUT_DIR, outputName);
-  const codec = getCodec(format);
+  const outputName = `audio-${Date.now()}`;
+  let outputExt = "m4a"; // default
 
   try {
-    // Try fast copy first if possible
+    // Probe video for audio stream
+    const probeData = await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(inputPath, (err, data) => {
+        if (err) reject(err);
+        else resolve(data);
+      });
+    });
+
+    const audioStream = probeData.streams.find(s => s.codec_type === "audio");
+    if (!audioStream) {
+      fs.unlinkSync(inputPath);
+      return res.status(400).json({ error: "No audio track found" });
+    }
+
+    // Determine output extension based on codec
+    const codec = audioStream.codec_name;
+    if (codec === "aac") outputExt = "m4a";
+    else if (codec === "mp3") outputExt = "mp3";
+    else if (codec === "opus") outputExt = "opus";
+    else if (codec === "vorbis") outputExt = "ogg";
+    else outputExt = "mka"; // fallback
+
+    const outputPath = path.join(OUTPUT_DIR, `${outputName}.${outputExt}`);
+
+    // Extract audio
     ffmpeg(inputPath)
       .noVideo()
       .audioCodec("copy")
       .on("end", () => {
         res.download(outputPath, () => {
-          cleanupFiles(inputPath, outputPath);
+          if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+          if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
         });
       })
-      .on("error", () => {
-        // Fallback: re-encode
-        ffmpeg(inputPath)
-          .noVideo()
-          .audioCodec(codec)
-          .audioBitrate(bitrate)
-          .outputOptions("-threads 0", "-preset ultrafast")
-          .on("end", () => {
-            res.download(outputPath, () => {
-              cleanupFiles(inputPath, outputPath);
-            });
-          })
-          .on("error", (err) => {
-            console.error("Conversion ERROR:", err);
-            cleanupFiles(inputPath, outputPath);
-            res.status(500).json({ error: err.message });
-          })
-          .save(outputPath);
+      .on("error", (err) => {
+        console.error("FFmpeg ERROR:", err.message);
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+        res.status(500).json({ error: "Extraction failed" });
       })
       .save(outputPath);
+
   } catch (err) {
-    console.error("Server ERROR:", err);
-    cleanupFiles(inputPath, outputPath);
-    res.status(500).json({ error: err.message });
+    console.error("FFprobe ERROR:", err);
+    if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+    res.status(500).json({ error: "FFprobe error" });
   }
 });
 
-// Helper to remove temp files
-function cleanupFiles(...files) {
-  files.forEach(file => {
-    if (file && fs.existsSync(file)) fs.unlinkSync(file);
-  });
-}
-
+// Start server
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
