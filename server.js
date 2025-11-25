@@ -9,95 +9,82 @@ import fs from "fs";
 
 const app = express();
 
+// FFmpeg paths
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
-app.use(cors({ origin: process.env.CLIENT_URL, }));
+// FIXED CORS — allows local dev and production client
+app.use(cors({
+  origin: ["https://audioremoveio.vercel.app/", process.env.CLIENT_URL],
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"],
+}));
 
+// Upload setup
 const upload = multer({ dest: "uploads/" });
+
+// Ensure output dir exists
 const OUTPUT_DIR = "./converted";
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR);
 
-function getCodec(format) {
-  switch (format) {
-    case "mp3": return "libmp3lame";
-    case "aac": return "aac";
-    case "wav": return "pcm_s16le";
-    case "ogg": return "libvorbis";
-    default: return null;
-  }
-}
-
-function getSecondsFromTime(timeString) {
-  if (!timeString) return 0;
-  const parts = timeString.split(':');
-  return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
-}
-
+// POST ROUTE
 app.post("/extract-audio", upload.single("video"), async (req, res) => {
-  const { format = "mp3", bitrate = "128k" } = req.body;
-
   if (!req.file) return res.status(400).json({ error: "No video uploaded" });
 
   const inputPath = req.file.path;
-  const outputName = `audio-${Date.now()}.${format}`;
-  const outputPath = path.join(OUTPUT_DIR, outputName);
+  const outputName = `audio-${Date.now()}`;
+  let outputExt = "m4a"; // default
 
-  let duration = 0;
   try {
-    duration = await new Promise((resolve, reject) => {
+    // Probe video to detect audio codec
+    const probeData = await new Promise((resolve, reject) => {
       ffmpeg.ffprobe(inputPath, (err, data) => {
         if (err) reject(err);
-        else resolve(data.format.duration);
+        else resolve(data);
       });
     });
-  } catch (err) {
-    console.error("FFprobe failed:", err);
-  }
 
-  const codec = getCodec(format);
+    const audioStream = probeData.streams.find(s => s.codec_type === "audio");
+    if (!audioStream) {
+      fs.unlinkSync(inputPath);
+      return res.status(400).json({ error: "No audio track found" });
+    }
 
-  res.setHeader("Content-Type", "application/octet-stream");
+    // Choose extension automatically
+    const codec = audioStream.codec_name;
+    if (codec === "aac") outputExt = "m4a";
+    else if (codec === "mp3") outputExt = "mp3";
+    else if (codec === "opus") outputExt = "opus";
+    else if (codec === "vorbis") outputExt = "ogg";
+    else outputExt = "mka"; // fallback container for unknown codecs
 
-  // Fast extraction using copy if
-  const command = ffmpeg(inputPath).noVideo();
+    const outputPath = path.join(OUTPUT_DIR, `${outputName}.${outputExt}`);
 
-  // Try copy first (super fast)
-  command.audioCodec("copy");
-
-  // Fallback to re-encode if codec is required
-  if (codec) command.audioCodec(codec).audioBitrate(bitrate);
-
-  let lastPercent = 0; // to control update jumps
-
-  command
-    .outputOptions("-threads 0")
-    .on("start", (cmd) => console.log("FFmpeg START:", cmd))
-    .on("progress", (data) => {
-      if (!data.timemark || !duration) return;
-      let current = getSecondsFromTime(data.timemark);
-      let percent = Math.floor((current / duration) * 100);
-
-      // Only send updates if percent jumped at least 5% (adjust as needed)
-      if (percent - lastPercent >= 5 || percent === 100) {
-        console.log(`Progress: ${percent}%`);
-        lastPercent = percent;
-        // Optionally: you can send percent to frontend via SSE or WebSocket
-      }
-    })
-    .on("end", () => {
-      console.log("DONE!");
-      res.download(outputPath, () => {
-        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+    // SUPER FAST extraction
+    ffmpeg(inputPath)
+      .noVideo()
+      .audioCodec("copy")
+      .on("end", () => {
+        // Send file to client
+        res.download(outputPath, () => {
+          // Cleanup after download
+          if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+          if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+        });
+      })
+      .on("error", (err) => {
+        console.error("FFmpeg ERROR:", err.message);
         if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-      });
-    })
-    .on("error", (err) => {
-      console.error("FFmpeg ERROR:", err.message);
-      if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-      res.status(500).json({ error: "Conversion failed" });
-    })
-    .save(outputPath);
+        res.status(500).json({ error: "Extraction failed" });
+      })
+      .save(outputPath);
+
+  } catch (err) {
+    console.error("FFprobe ERROR:", err);
+    if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+    res.status(500).json({ error: "FFprobe error" });
+  }
 });
 
+// Start server
 app.listen(3001, () => console.log("Server running on port 3001"));
