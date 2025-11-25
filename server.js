@@ -15,7 +15,7 @@ ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
 // FIXED CORS — allows local dev and production client
 app.use(cors({
-  origin: ["https://audioremoveio.vercel.app", process.env.CLIENT_URL],
+  origin: ["https://audioremoveio.vercel.app"],
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type"],
 }));
