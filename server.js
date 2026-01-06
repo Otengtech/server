@@ -1,3 +1,4 @@
+
 import express from "express";
 import multer from "multer";
 import cors from "cors";
@@ -18,12 +19,14 @@ const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY || "your_assemblyai_ap
 const ASSEMBLYAI_BASE_URL = "https://api.assemblyai.com/v2";
 
 // CORS
+
 app.use(cors({
-  origin: "*", // Allow all origins for now, or use specific
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
-  exposedHeaders: ["Content-Disposition"]
+  origin: [
+    "http://localhost:5173",
+    "https://audioremoveio.vercel.app"
+  ],
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"],
 }));
 
 // Handle preflight requests
