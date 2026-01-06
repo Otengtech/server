@@ -3,7 +3,7 @@ services:
     name: audio-extractor
     env: node
     buildCommand: |
-      npm install
+      pnpm install
       chmod +x node_modules/@ffmpeg-installer/linux-x64/ffmpeg
       chmod +x node_modules/@ffprobe-installer/linux-x64/ffprobe
     startCommand: npm start
