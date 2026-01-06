@@ -19,14 +19,15 @@ const ASSEMBLYAI_BASE_URL = "https://api.assemblyai.com/v2";
 
 // CORS
 app.use(cors({
-  origin: [
-    "http://localhost:5173",
-    "https://server-uhlg.onrender.com",
-    "https://audioremoveio.vercel.app"
-  ],
-  methods: ["GET", "POST"],
-  allowedHeaders: ["Content-Type"],
+  origin: "*", // Allow all origins for now, or use specific
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  exposedHeaders: ["Content-Disposition"]
 }));
+
+// Handle preflight requests
+app.options("*", cors());
 
 app.use(express.json());
 
