@@ -4,7 +4,9 @@ services:
     env: node
     buildCommand: |
       pnpm install
-      chmod +x node_modules/@ffmpeg-installer/linux-x64/ffmpeg
-      chmod +x node_modules/@ffprobe-installer/linux-x64/ffprobe
+      chmod 755 node_modules/@ffmpeg-installer/linux-x64/ffmpeg
+      chmod 755 node_modules/@ffprobe-installer/linux-x64/ffprobe
+      ls -la node_modules/@ffmpeg-installer/linux-x64/
+      ls -la node_modules/@ffprobe-installer/linux-x64/
     startCommand: npm start
     healthCheckPath: /health
