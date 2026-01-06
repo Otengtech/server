@@ -8,15 +8,33 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
+import { execSync } from "child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const app = express();
 
+// FIX: Set execute permissions for FFprobe on Render
+try {
+  const ffprobePath = ffprobeInstaller.path;
+  if (fs.existsSync(ffprobePath)) {
+    // Make ffprobe executable
+    fs.chmodSync(ffprobePath, 0o755);
+    console.log(`✅ FFprobe permissions set: ${ffprobePath}`);
+  } else {
+    console.log(`⚠️ FFprobe not found at: ${ffprobePath}`);
+  }
+} catch (err) {
+  console.log(`⚠️ Could not set FFprobe permissions: ${err.message}`);
+}
+
 // FFmpeg paths
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 ffmpeg.setFfprobePath(ffprobeInstaller.path);
+
+console.log("FFmpeg path:", ffmpegInstaller.path);
+console.log("FFprobe path:", ffprobeInstaller.path);
 
 // CORS
 app.use(cors({
@@ -35,6 +53,57 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
     service: "audio-extractor"
   });
+});
+
+// Test endpoint to check FFmpeg/FFprobe
+app.get("/test-ffmpeg", (req, res) => {
+  try {
+    // Test FFmpeg
+    const ffmpegPath = ffmpegInstaller.path;
+    const ffprobePath = ffprobeInstaller.path;
+    
+    const ffmpegExists = fs.existsSync(ffmpegPath);
+    const ffprobeExists = fs.existsSync(ffprobePath);
+    
+    let ffmpegVersion = "Unknown";
+    let ffprobeVersion = "Unknown";
+    
+    if (ffmpegExists) {
+      try {
+        const ffmpegStats = fs.statSync(ffmpegPath);
+        ffmpegVersion = `Exists (Permissions: ${(ffmpegStats.mode & 0o777).toString(8)})`;
+      } catch (e) {
+        ffmpegVersion = `Exists but error: ${e.message}`;
+      }
+    }
+    
+    if (ffprobeExists) {
+      try {
+        const ffprobeStats = fs.statSync(ffprobePath);
+        ffprobeVersion = `Exists (Permissions: ${(ffprobeStats.mode & 0o777).toString(8)})`;
+      } catch (e) {
+        ffprobeVersion = `Exists but error: ${e.message}`;
+      }
+    }
+    
+    res.json({
+      ffmpeg: {
+        path: ffmpegPath,
+        exists: ffmpegExists,
+        version: ffmpegVersion
+      },
+      ffprobe: {
+        path: ffprobePath,
+        exists: ffprobeExists,
+        version: ffprobeVersion
+      },
+      platform: process.platform,
+      arch: process.arch,
+      node: process.version
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Use /tmp directory for Render compatibility
@@ -79,7 +148,7 @@ const storage = multer.diskStorage({
     cb(null, UPLOAD_DIR);
   },
   filename: (req, file, cb) => {
-    const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(7)}-${file.originalname}`;
+    const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(7)}-${file.originalname.replace(/[^a-zA-Z0-9.]/g, '_')}`;
     cb(null, uniqueName);
   }
 });
@@ -92,7 +161,7 @@ const upload = multer({
   }
 });
 
-// POST route - Optimized for speed and Render
+// SIMPLIFIED POST route - No FFprobe dependency
 app.post("/extract-audio", upload.single("video"), async (req, res) => {
   const startTime = Date.now();
   
@@ -100,95 +169,61 @@ app.post("/extract-audio", upload.single("video"), async (req, res) => {
     return res.status(400).json({ error: "No video uploaded" });
   }
 
+  console.log(`Processing: ${req.file.originalname} (${Math.round(req.file.size / 1024 / 1024)} MB)`);
+
   const inputPath = req.file.path;
   const outputName = `audio-${Date.now()}`;
-  let outputExt = "mp3"; // Default to MP3 for compatibility
-  let audioCodec = "copy"; // Try to copy codec first
+  
+  // Always use MP3 - simpler and more reliable
+  const outputExt = "mp3";
+  const outputPath = path.join(OUTPUT_DIR, `${outputName}.${outputExt}`);
 
   try {
-    // FAST: Probe video for audio stream (with timeout)
-    const probeData = await Promise.race([
-      new Promise((resolve, reject) => {
-        ffmpeg.ffprobe(inputPath, (err, data) => {
-          if (err) {
-            // Continue even if probe fails
-            resolve({ streams: [] });
-          } else {
-            resolve(data);
-          }
-        });
-      }),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error("FFprobe timeout")), 5000)
-      )
-    ]);
-
-    const audioStream = probeData.streams?.find(s => s.codec_type === "audio");
-    
-    if (!audioStream) {
-      console.log("No audio stream found via probe, using default MP3");
-      // Continue anyway, will try to extract
-    } else {
-      // Determine output extension based on codec
-      const codec = audioStream.codec_name;
-      
-      if (codec === "aac" || codec === "mp4a") {
-        outputExt = "m4a";
-        audioCodec = "copy";
-      } else if (codec === "mp3") {
-        outputExt = "mp3";
-        audioCodec = "copy";
-      } else if (codec === "opus") {
-        outputExt = "opus";
-        audioCodec = "copy";
-      } else if (codec === "vorbis") {
-        outputExt = "ogg";
-        audioCodec = "copy";
-      } else {
-        // For unknown codecs, convert to MP3
-        outputExt = "mp3";
-        audioCodec = "libmp3lame";
-      }
-    }
-
-    const outputPath = path.join(OUTPUT_DIR, `${outputName}.${outputExt}`);
-
-    // Create ffmpeg command with optimized settings
+    // Simple FFmpeg command without FFprobe
     const command = ffmpeg(inputPath)
       .noVideo()
-      .audioCodec(audioCodec)
+      .audioCodec('libmp3lame')
+      .audioBitrate('192k')
+      .audioChannels(2)
+      .audioFrequency(44100)
+      .format('mp3')
+      .outputOptions('-preset fast') // Balance between speed and quality
       .on("start", (cmdLine) => {
         console.log(`FFmpeg started (${Date.now() - startTime}ms)`);
+        console.log(`Command: ${cmdLine.substring(0, 200)}...`);
       })
       .on("progress", (progress) => {
         if (progress.percent) {
+          console.log(`Progress: ${Math.round(progress.percent)}%`);
         }
       })
       .on("stderr", (stderrLine) => {
-        // Log warnings/errors only
-        if (stderrLine.toLowerCase().includes("error") || 
-            stderrLine.toLowerCase().includes("warning")) {
+        // Log important messages
+        if (stderrLine.includes('frame=') || stderrLine.includes('time=')) {
+          // Progress info - log occasionally
+          if (Math.random() < 0.1) { // Log 10% of progress messages
+            console.log(`FFmpeg: ${stderrLine.trim()}`);
+          }
+        } else if (stderrLine.toLowerCase().includes("error")) {
+          console.error(`FFmpeg ERROR: ${stderrLine}`);
         }
       })
-      .on("error", (err) => {
-        
-        // If copy failed, try converting to MP3
-        if (audioCodec === "copy" && err.message.includes("copy")) {
-          console.log("Copy failed, trying MP3 conversion...");
-          retryWithMP3Conversion(inputPath, outputName, res, startTime);
-          return;
-        }
+      .on("error", (err, stdout, stderr) => {
+        console.error('FFmpeg process error:', err.message);
+        console.error('FFmpeg stderr:', stderr);
         
         // Cleanup and send error
         cleanupFiles([inputPath, outputPath]);
         if (!res.headersSent) {
           res.status(500).json({ 
             error: "Audio extraction failed", 
-            message: err.message 
+            message: err.message,
+            details: stderr.substring(0, 200) // First 200 chars
           });
         }
       })
       .on("end", () => {
+        console.log(`Processing complete (${Date.now() - startTime}ms)`);
         
         // Check if output file exists and has content
         if (!fs.existsSync(outputPath)) {
@@ -200,21 +235,26 @@ app.post("/extract-audio", upload.single("video"), async (req, res) => {
         }
 
         const stats = fs.statSync(outputPath);
+        console.log(`Output file size: ${stats.size} bytes`);
+        
         if (stats.size === 0) {
           cleanupFiles([inputPath, outputPath]);
-          retryWithMP3Conversion(inputPath, outputName, res, startTime);
+          if (!res.headersSent) {
+            res.status(500).json({ error: "Empty output file created" });
+          }
           return;
         }
-        
+
         // Send the file
         res.download(outputPath, `audio.${outputExt}`, (err) => {
           // Cleanup after download
           cleanupFiles([inputPath, outputPath]);
           
           if (err && !res.headersSent) {
-            res.status(500).json({ error: "Download failed" });
+            console.error("Download error:", err);
+            res.status(500).json({ error: "Download failed", message: err.message });
           } else {
-            console.log(`✓ Total time: ${Date.now() - startTime}ms`);
+            console.log(`✓ Success! Total time: ${Date.now() - startTime}ms`);
           }
         });
       });
@@ -223,6 +263,7 @@ app.post("/extract-audio", upload.single("video"), async (req, res) => {
     command.save(outputPath);
 
   } catch (err) {
+    console.error("Server ERROR:", err.message, err.stack);
     cleanupFiles([inputPath]);
     
     if (!res.headersSent) {
@@ -234,60 +275,15 @@ app.post("/extract-audio", upload.single("video"), async (req, res) => {
   }
 });
 
-// Helper function to retry with MP3 conversion
-function retryWithMP3Conversion(inputPath, outputName, res, startTime) {
-  const outputPath = path.join(OUTPUT_DIR, `${outputName}.mp3`);
-  
-  
-  ffmpeg(inputPath)
-    .noVideo()
-    .audioCodec("libmp3lame")
-    .audioBitrate("192k")
-    .audioChannels(2)
-    .audioFrequency(44100)
-    .outputOptions("-preset fast")
-    .on("start", () => {
-    })
-    .on("error", (err) => {
-      cleanupFiles([inputPath, outputPath]);
-      if (!res.headersSent) {
-        res.status(500).json({ 
-          error: "Audio conversion failed", 
-          message: err.message 
-        });
-      }
-    })
-    .on("end", () => {
-      
-      if (!fs.existsSync(outputPath)) {
-        cleanupFiles([inputPath]);
-        if (!res.headersSent) {
-          res.status(500).json({ error: "MP3 output not created" });
-        }
-        return;
-      }
-      
-      res.download(outputPath, "audio.mp3", (err) => {
-        cleanupFiles([inputPath, outputPath]);
-        if (err && !res.headersSent) {
-          console.error("Download error:", err);
-          res.status(500).json({ error: "Download failed" });
-        } else {
-          console.log(`✓ Total time with retry: ${Date.now() - startTime}ms`);
-        }
-      });
-    })
-    .save(outputPath);
-}
-
 // Helper function to cleanup files
 function cleanupFiles(filePaths) {
   filePaths.forEach(filePath => {
     if (filePath && fs.existsSync(filePath)) {
       try {
         fs.unlinkSync(filePath);
+        console.log(`Cleaned up: ${filePath}`);
       } catch (err) {
-        // Ignore cleanup errors
+        console.log(`Failed to cleanup ${filePath}: ${err.message}`);
       }
     }
   });
