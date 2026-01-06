@@ -21,6 +21,7 @@ const ASSEMBLYAI_BASE_URL = "https://api.assemblyai.com/v2";
 app.use(cors({
   origin: [
     "http://localhost:5173",
+    "https://server-uhlg.onrender.com",
     "https://audioremoveio.vercel.app"
   ],
   methods: ["GET", "POST"],
@@ -402,10 +403,5 @@ function getExtension(contentType) {
 // Start server
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🔧 Health check: http://localhost:${PORT}/health`);
-  console.log(`📊 API Status: http://localhost:${PORT}/api-status`);
-  console.log(`🎵 Main endpoint: POST http://localhost:${PORT}/extract-audio`);
-  console.log(`📝 With transcript: POST http://localhost:${PORT}/extract-with-transcript`);
-  console.log(`🔑 Using AssemblyAI API`);
+  console.log(`🚀 Server running on port ${PORT}`)
 });
